@@ -125,3 +125,78 @@ Here is an example of an Azure Function in C# that receives orders from a client
       return new OkResult();
   }
 ```
+
+Note that in this example, the SaveOrderFunction receives an HTTP request containing the order details in the request body. It then deserializes the request body into an Order object and saves it, along with an associated OrderEvent, to Cosmos DB using a single transaction. The Cosmos DB endpoint URL, primary key, database name, container name, and partition key are all hard-coded, but you should replace them with your own values with dependency injection.
+
+### Outbox worker – Second Azure Function
+
+```csharp
+ [FunctionName("OutboxWorkerFunction")]
+    public static async Task Run(
+        [CosmosDBTrigger(databaseName: "your-database-name", collectionName: "your-collection-name",
+        ConnectionStringSetting = "CosmosDBConnectionString",
+        LeaseCollectionName = "leases",
+        CreateLeaseCollectionIfNotExists = true)] IReadOnlyList<Document> inputDocuments,
+        [CosmosDB(
+                databaseName: "%CosmosDBDatabaseName%",
+                collectionName: "%CosmosDBCollectionName%",
+                ConnectionStringSetting = "CosmosDBConnectionString",
+                SqlQuery = "select * from Orders r where r.orderProcessed = false")] IEnumerable<Document> ordersCreated,
+        [CosmosDB(
+                databaseName: "%CosmosDBDatabaseName%",
+                collectionName: "%CosmosDBCollectionName%",
+                ConnectionStringSetting = "CosmosDBConnectionString"
+            )] DocumentClient client,
+        ILogger log)
+    {
+        log.LogInformation($"Cosmos DB trigger function processed {inputDocuments.Count} documents");
+
+        var serviceBusConnectionString = Environment.GetEnvironmentVariable("ServiceBusConnectionString");
+        var serviceBusQueueName = Environment.GetEnvironmentVariable("ServiceBusQueueName");
+
+
+
+        if (inputDocuments.Any())
+        {
+            var serviceBusClient = new ServiceBusClient(serviceBusConnectionString);
+
+            foreach (var o in ordersCreated)
+            {
+                var orderCreatedEvent = JsonConvert.DeserializeObject<Order>(o.ToString());
+                var orderCreatedEventData = JsonConvert.SerializeObject(orderCreatedEvent);
+                var orderCreatedMessage = new ServiceBusMessage(Encoding.UTF8.GetBytes(orderCreatedEventData));
+
+                // Set the MessageId property to the OrderOutbox Id to enable duplicate detection
+                orderCreatedMessage.MessageId = o.Id;
+
+                ServiceBusSender senderB = serviceBusClient.CreateSender(serviceBusQueueName);
+                await senderB.SendMessageAsync(orderCreatedMessage);
+
+                // Update the OrderOutbox entry to indicate that it has been processed
+                o.SetPropertyValue("OrderProcessed", true);
+                await client.ReplaceDocumentAsync(o);
+            }
+        }
+    }
+```
+
+This is an Azure Function named « OutboxWorkerFunction ».
+
+It is triggered by a change feed in Cosmos DB, which means that it is called whenever a document in the specified Cosmos DB collection is modified.
+
+The function takes in three input parameters:
+
+- inputDocuments of type IReadOnlyList<Document>: This parameter is provided by the Cosmos DB trigger, and it contains a list of documents that triggered the function.
+- ordersCreated of type IEnumerable<Document>: This is an input binding that specifies a SQL query to retrieve all orders that have not been processed yet.
+- client of type DocumentClient: This parameter represents the Cosmos DB client used to interact with the database.
+
+The function first logs the number of documents processed by the trigger. It then retrieves the connection string and queue name for the Service Bus instance from environment variables. If there are any orders created, the function creates a new ServiceBusClient instance and loops through the orders.
+
+For each order, it deserializes the Order object from the Cosmos DB document, serializes the object as a JSON string, creates a new ServiceBusMessage, and sets the MessageId property to the Cosmos DB document ID. This enables duplicate detection in Azure Service Bus. The function then sends the message to the Service Bus queue using the SendMessageAsync method of the ServiceBusSender class.
+
+Finally, the function updates the corresponding Cosmos DB document to set the OrderProcessed property to true, indicating that the order has been processed. This is done using the SetPropertyValue method of the Document class and the ReplaceDocumentAsync method of the DocumentClient class.
+
+## Conclusion
+The Outbox Pattern implemented with Azure Functions and Cosmos DB provides a reliable way to ensure that all changes to a system are captured and propagated to other systems through a message broker.
+
+By using a single transaction to write both the transactional data and the events to the database, the Outbox Pattern eliminates the possibility of data inconsistencies. The use of Cosmos DB’s change feed and Azure Functions’ triggers provides a scalable and event-driven architecture that can easily adapt to changing requirements. Finally, by using Azure Service Bus’ duplicate detection feature, the system can ensure that each message is delivered only once, even in the face of intermittent network failures.
