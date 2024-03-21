@@ -1,4 +1,4 @@
-# outbox-pattern-in-a-serverless-architecture-with-azure
+# Implementing the Outbox Pattern in a Serverless Architecture with Azure Services and C#
 
 
 ## Introduction
